@@ -6,6 +6,12 @@ Vue.use(VueRouter);
 // The meta.group param is used in App.vue to expand menu group by name.
 const routes = [
   {
+    path: '/404',
+    name: '404_page',
+    meta: { title: '404' },
+    component: () => import(/* webpackChunkName: "main" */ '../views/404.vue'),
+  },
+  {
     path: '/',
     name: 'dashboard',
     meta: { title: 'Dashboard' },
@@ -24,6 +30,12 @@ const routes = [
     component: () => import(/* webpackChunkName: "main" */ '../views/Forms.vue'),
   },
   {
+    path: '/lists/:id',
+    name: 'lists',
+    meta: { title: 'Lists', group: 'lists' },
+    component: () => import(/* webpackChunkName: "main" */ '../views/Lists.vue'),
+  },
+  {
     path: '/subscribers',
     name: 'subscribers',
     meta: { title: 'Subscribers', group: 'subscribers' },
@@ -34,6 +46,12 @@ const routes = [
     name: 'import',
     meta: { title: 'Import subscribers', group: 'subscribers' },
     component: () => import(/* webpackChunkName: "main" */ '../views/Import.vue'),
+  },
+  {
+    path: '/subscribers/bounces',
+    name: 'bounces',
+    meta: { title: 'Bounces', group: 'subscribers' },
+    component: () => import(/* webpackChunkName: "main" */ '../views/Bounces.vue'),
   },
   {
     path: '/subscribers/lists/:listID',
@@ -66,6 +84,12 @@ const routes = [
     component: () => import(/* webpackChunkName: "main" */ '../views/Templates.vue'),
   },
   {
+    path: '/campaigns/analytics',
+    name: 'campaignAnalytics',
+    meta: { title: 'Campaign analytics', group: 'campaigns' },
+    component: () => import(/* webpackChunkName: "main" */ '../views/CampaignAnalytics.vue'),
+  },
+  {
     path: '/campaigns/:id',
     name: 'campaign',
     meta: { title: 'Campaign', group: 'campaigns' },
@@ -96,6 +120,14 @@ const router = new VueRouter({
     }
     return { x: 0, y: 0 };
   },
+});
+
+router.beforeEach((to, from, next) => {
+  if (to.matched.length === 0) {
+    next('/404');
+  } else {
+    next();
+  }
 });
 
 router.afterEach((to) => {

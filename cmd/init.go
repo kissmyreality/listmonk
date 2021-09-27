@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -20,6 +21,8 @@ import (
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/posflag"
+	"github.com/knadh/listmonk/internal/bounce"
+	"github.com/knadh/listmonk/internal/bounce/mailbox"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
 	"github.com/knadh/listmonk/internal/media"
@@ -36,24 +39,29 @@ import (
 
 const (
 	queryFilePath = "queries.sql"
+
+	// Root URI of the admin frontend.
+	adminRoot = "/admin"
 )
 
 // constants contains static, constant config values required by the app.
 type constants struct {
-	RootURL             string   `koanf:"root_url"`
-	LogoURL             string   `koanf:"logo_url"`
-	FaviconURL          string   `koanf:"favicon_url"`
-	FromEmail           string   `koanf:"from_email"`
-	NotifyEmails        []string `koanf:"notify_emails"`
-	EnablePublicSubPage bool     `koanf:"enable_public_subscription_page"`
-	Lang                string   `koanf:"lang"`
-	DBBatchSize         int      `koanf:"batch_size"`
-	Privacy             struct {
+	RootURL               string   `koanf:"root_url"`
+	LogoURL               string   `koanf:"logo_url"`
+	FaviconURL            string   `koanf:"favicon_url"`
+	FromEmail             string   `koanf:"from_email"`
+	NotifyEmails          []string `koanf:"notify_emails"`
+	EnablePublicSubPage   bool     `koanf:"enable_public_subscription_page"`
+	SendOptinConfirmation bool     `koanf:"send_optin_confirmation"`
+	Lang                  string   `koanf:"lang"`
+	DBBatchSize           int      `koanf:"batch_size"`
+	Privacy               struct {
 		IndividualTracking bool            `koanf:"individual_tracking"`
 		AllowBlocklist     bool            `koanf:"allow_blocklist"`
 		AllowExport        bool            `koanf:"allow_export"`
 		AllowWipe          bool            `koanf:"allow_wipe"`
 		Exportable         map[string]bool `koanf:"-"`
+		DomainBlocklist    map[string]bool `koanf:"-"`
 	} `koanf:"privacy"`
 	AdminUsername []byte `koanf:"admin_username"`
 	AdminPassword []byte `koanf:"admin_password"`
@@ -64,6 +72,10 @@ type constants struct {
 	OptinURL      string
 	MessageURL    string
 	MediaProvider string
+
+	BounceWebhooksEnabled bool
+	BounceSESEnabled      bool
+	BounceSendgridEnabled bool
 }
 
 func initFlags() {
@@ -77,13 +89,14 @@ func initFlags() {
 	// Register the commandline flags.
 	f.StringSlice("config", []string{"config.toml"},
 		"path to one or more config files (will be merged in order)")
-	f.Bool("install", false, "run first time installation")
+	f.Bool("install", false, "setup database (first time)")
+	f.Bool("idempotent", false, "make --install run only if the databse isn't already setup")
 	f.Bool("upgrade", false, "upgrade database to the current version")
 	f.Bool("version", false, "current version of the build")
 	f.Bool("new-config", false, "generate sample config file")
 	f.String("static-dir", "", "(optional) path to directory with static files")
 	f.String("i18n-dir", "", "(optional) path to directory with i18n language files")
-	f.Bool("yes", false, "assume 'yes' to prompts, eg: during --install")
+	f.Bool("yes", false, "assume 'yes' to prompts during --install/upgrade")
 	if err := f.Parse(os.Args[1:]); err != nil {
 		lo.Fatalf("error loading flags: %v", err)
 	}
@@ -108,74 +121,100 @@ func initConfigFiles(files []string, ko *koanf.Koanf) {
 
 // initFileSystem initializes the stuffbin FileSystem to provide
 // access to bunded static assets to the app.
-func initFS(staticDir, i18nDir string) stuffbin.FileSystem {
+func initFS(appDir, frontendDir, staticDir, i18nDir string) stuffbin.FileSystem {
+	var (
+		// stuffbin real_path:virtual_alias paths to map local assets on disk
+		// when there an embedded filestystem is not found.
+
+		// These paths are joined with appDir.
+		appFiles = []string{
+			"./config.toml.sample:config.toml.sample",
+			"./queries.sql:queries.sql",
+			"./schema.sql:schema.sql",
+		}
+
+		frontendFiles = []string{
+			// Admin frontend's static assets accessible at /admin/* during runtime.
+			// These paths are sourced from frontendDir.
+			"./:/admin",
+		}
+
+		staticFiles = []string{
+			// These paths are joined with staticDir.
+			"./email-templates:static/email-templates",
+			"./public:/public",
+		}
+
+		i18nFiles = []string{
+			// These paths are joined with i18nDir.
+			"./:/i18n",
+		}
+	)
+
 	// Get the executable's path.
 	path, err := os.Executable()
 	if err != nil {
 		lo.Fatalf("error getting executable path: %v", err)
 	}
 
-	// Load the static files stuffed in the binary.
+	// Load embedded files in the executable.
+	hasEmbed := true
 	fs, err := stuffbin.UnStuff(path)
 	if err != nil {
+		hasEmbed = false
+
 		// Running in local mode. Load local assets into
 		// the in-memory stuffbin.FileSystem.
-		lo.Printf("unable to initialize embedded filesystem: %v", err)
-		lo.Printf("using local filesystem for static assets")
-		files := []string{
-			"config.toml.sample",
-			"queries.sql",
-			"schema.sql",
+		lo.Printf("unable to initialize embedded filesystem (%v). Using local filesystem", err)
 
-			// The frontend app's static assets are aliased to /frontend
-			// so that they are accessible at /frontend/js/* etc.
-			// Alias all files inside dist/ and dist/frontend to frontend/*.
-			"frontend/dist/favicon.png:/frontend/favicon.png",
-			"frontend/dist/frontend:/frontend",
-			"i18n:/i18n",
-		}
-
-		// If no external static dir is provided, try to load from the working dir.
-		if staticDir == "" {
-			files = append(files, "static/email-templates", "static/public:/public")
-		}
-
-		fs, err = stuffbin.NewLocalFS("/", files...)
+		fs, err = stuffbin.NewLocalFS("/")
 		if err != nil {
 			lo.Fatalf("failed to initialize local file for assets: %v", err)
 		}
 	}
 
-	// Optional static directory to override static files.
-	if staticDir != "" {
-		lo.Printf("loading static files from: %v", staticDir)
-		fStatic, err := stuffbin.NewLocalFS("/", []string{
-			filepath.Join(staticDir, "/email-templates") + ":/static/email-templates",
-
-			// Alias /static/public to /public for the HTTP fileserver.
-			filepath.Join(staticDir, "/public") + ":/public",
-		}...)
-		if err != nil {
-			lo.Fatalf("failed reading static directory: %s: %v", staticDir, err)
-		}
-
-		if err := fs.Merge(fStatic); err != nil {
-			lo.Fatalf("error merging static directory: %s: %v", staticDir, err)
-		}
+	// If the embed failed, load app and frontend files from the compile-time paths.
+	files := []string{}
+	if !hasEmbed {
+		files = append(files, joinFSPaths(appDir, appFiles)...)
+		files = append(files, joinFSPaths(frontendDir, frontendFiles)...)
 	}
 
-	// Optional static directory to override i18n language files.
-	if i18nDir != "" {
-		lo.Printf("loading i18n language files from: %v", i18nDir)
-		fi18n, err := stuffbin.NewLocalFS("/", []string{i18nDir + ":/i18n"}...)
-		if err != nil {
-			lo.Fatalf("failed reading i18n directory: %s: %v", i18nDir, err)
+	// Irrespective of the embeds, if there are user specified static or i18n paths,
+	// load files from there and override default files (embedded or picked up from CWD).
+	if !hasEmbed || i18nDir != "" {
+		if i18nDir == "" {
+			// Default dir in cwd.
+			i18nDir = "i18n"
 		}
-
-		if err := fs.Merge(fi18n); err != nil {
-			lo.Fatalf("error merging i18n directory: %s: %v", i18nDir, err)
-		}
+		lo.Printf("will load i18n files from: %v", i18nDir)
+		files = append(files, joinFSPaths(i18nDir, i18nFiles)...)
 	}
+
+	if !hasEmbed || staticDir != "" {
+		if staticDir == "" {
+			// Default dir in cwd.
+			staticDir = "static"
+		}
+		lo.Printf("will load static files from: %v", staticDir)
+		files = append(files, joinFSPaths(staticDir, staticFiles)...)
+	}
+
+	// No additional files to load.
+	if len(files) == 0 {
+		return fs
+	}
+
+	// Load files from disk and overlay into the FS.
+	fStatic, err := stuffbin.NewLocalFS("/", files...)
+	if err != nil {
+		lo.Fatalf("failed reading static files from disk: '%s': %v", staticDir, err)
+	}
+
+	if err := fs.Merge(fStatic); err != nil {
+		lo.Fatalf("error merging static files: '%s': %v", staticDir, err)
+	}
+
 	return fs
 }
 
@@ -253,6 +292,7 @@ func initConstants() *constants {
 	c.Lang = ko.String("app.lang")
 	c.Privacy.Exportable = maps.StringSliceToLookupMap(ko.Strings("privacy.exportable"))
 	c.MediaProvider = ko.String("upload.provider")
+	c.Privacy.DomainBlocklist = maps.StringSliceToLookupMap(ko.Strings("privacy.domain_blocklist"))
 
 	// Static URLS.
 	// url.com/subscription/{campaign_uuid}/{subscriber_uuid}
@@ -269,6 +309,10 @@ func initConstants() *constants {
 
 	// url.com/campaign/{campaign_uuid}/{subscriber_uuid}/px.png
 	c.ViewTrackURL = fmt.Sprintf("%s/campaign/%%s/%%s/px.png", c.RootURL)
+
+	c.BounceWebhooksEnabled = ko.Bool("bounce.webhooks_enabled")
+	c.BounceSESEnabled = ko.Bool("bounce.ses_enabled")
+	c.BounceSendgridEnabled = ko.Bool("bounce.sendgrid_enabled")
 	return &c
 }
 
@@ -317,14 +361,14 @@ func initCampaignManager(q *Queries, cs *constants, app *App) *manager.Manager {
 		SlidingWindow:         ko.Bool("app.message_sliding_window"),
 		SlidingWindowDuration: ko.Duration("app.message_sliding_window_duration"),
 		SlidingWindowRate:     ko.Int("app.message_sliding_window_rate"),
-	}, newManagerDB(q), campNotifCB, app.i18n, lo)
-
+	}, newManagerStore(q), campNotifCB, app.i18n, lo)
 }
 
 // initImporter initializes the bulk subscriber importer.
 func initImporter(q *Queries, db *sqlx.DB, app *App) *subimporter.Importer {
 	return subimporter.New(
 		subimporter.Options{
+			DomainBlocklist:    app.constants.Privacy.DomainBlocklist,
 			UpsertStmt:         q.UpsertSubscriber.Stmt,
 			BlocklistStmt:      q.UpsertBlocklistSubscriber.Stmt,
 			UpdateListDateStmt: q.UpdateListsDate.Stmt,
@@ -332,7 +376,7 @@ func initImporter(q *Queries, db *sqlx.DB, app *App) *subimporter.Importer {
 				app.sendNotification(app.constants.NotifyEmails, subject, notifTplImport, data)
 				return nil
 			},
-		}, db.DB)
+		}, db.DB, app.i18n)
 }
 
 // initSMTPMessenger initializes the SMTP messenger.
@@ -416,7 +460,7 @@ func initPostbackMessengers(m *manager.Manager) []messenger.Messenger {
 func initMediaStore() media.Store {
 	switch provider := ko.String("upload.provider"); provider {
 	case "s3":
-		var o s3.Opts
+		var o s3.Opt
 		ko.Unmarshal("upload.s3", &o)
 		up, err := s3.NewS3Store(o)
 		if err != nil {
@@ -468,6 +512,45 @@ func initNotifTemplates(path string, fs stuffbin.FileSystem, i *i18n.I18n, cs *c
 	return tpl
 }
 
+// initBounceManager initializes the bounce manager that scans mailboxes and listens to webhooks
+// for incoming bounce events.
+func initBounceManager(app *App) *bounce.Manager {
+	opt := bounce.Opt{
+		BounceCount:     ko.MustInt("bounce.count"),
+		BounceAction:    ko.MustString("bounce.action"),
+		WebhooksEnabled: ko.Bool("bounce.webhooks_enabled"),
+		SESEnabled:      ko.Bool("bounce.ses_enabled"),
+		SendgridEnabled: ko.Bool("bounce.sendgrid_enabled"),
+		SendgridKey:     ko.String("bounce.sendgrid_key"),
+	}
+
+	// For now, only one mailbox is supported.
+	for _, b := range ko.Slices("bounce.mailboxes") {
+		if !b.Bool("enabled") {
+			continue
+		}
+
+		var boxOpt mailbox.Opt
+		if err := b.UnmarshalWithConf("", &boxOpt, koanf.UnmarshalConf{Tag: "json"}); err != nil {
+			lo.Fatalf("error reading bounce mailbox config: %v", err)
+		}
+
+		opt.MailboxType = b.String("type")
+		opt.MailboxEnabled = true
+		opt.Mailbox = boxOpt
+		break
+	}
+
+	b, err := bounce.New(opt, &bounce.Queries{
+		RecordQuery: app.queries.RecordBounce,
+	}, app.log)
+	if err != nil {
+		lo.Fatalf("error initializing bounce manager: %v", err)
+	}
+
+	return b
+}
+
 // initHTTPServer sets up and runs the app's main HTTP server and blocks forever.
 func initHTTPServer(app *App) *echo.Echo {
 	// Initialize the HTTP server.
@@ -498,15 +581,21 @@ func initHTTPServer(app *App) *echo.Echo {
 
 	// Initialize the static file server.
 	fSrv := app.fs.FileServer()
+
+	// Public (subscriber) facing static files.
 	srv.GET("/public/*", echo.WrapHandler(fSrv))
-	srv.GET("/frontend/*", echo.WrapHandler(fSrv))
+
+	// Admin (frontend) facing static files.
+	srv.GET("/admin/static/*", echo.WrapHandler(fSrv))
+
+	// Public (subscriber) facing media upload files.
 	if ko.String("upload.provider") == "filesystem" {
 		srv.Static(ko.String("upload.filesystem.upload_uri"),
 			ko.String("upload.filesystem.upload_path"))
 	}
 
 	// Register all HTTP handlers.
-	registerHTTPHandlers(srv, app)
+	initHTTPHandlers(srv, app)
 
 	// Start the server.
 	go func() {
@@ -550,6 +639,18 @@ func awaitReload(sigChan chan os.Signal, closerWait chan bool, closer func()) ch
 			}
 		}
 	}()
+
+	return out
+}
+
+func joinFSPaths(root string, paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		// real_path:stuffbin_alias
+		f := strings.Split(p, ":")
+
+		out = append(out, path.Join(root, f[0])+":"+f[1])
+	}
 
 	return out
 }

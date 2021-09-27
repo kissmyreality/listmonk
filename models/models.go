@@ -9,6 +9,7 @@ import (
 	"html/template"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	"github.com/jmoiron/sqlx/types"
@@ -62,6 +63,13 @@ const (
 
 	// ContentTpl is the name of the compiled message.
 	ContentTpl = "content"
+
+	// Headers attached to e-mails for bounce tracking.
+	EmailHeaderSubscriberUUID = "X-Listmonk-Subscriber"
+	EmailHeaderCampaignUUID   = "X-Listmonk-Campaign"
+
+	BounceTypeHard = "hard"
+	BounceTypeSoft = "soft"
 )
 
 // regTplFunc represents contains a regular expression for wrapping and
@@ -72,15 +80,23 @@ type regTplFunc struct {
 	replace string
 }
 
-// Regular expression for matching {{ Track "http://link.com" }} in the template
-// and substituting it with {{ Track "http://link.com" .Campaign.UUID .Subscriber.UUID }}
-// before compilation. This string gimmick is to make linking easier for users.
 var regTplFuncs = []regTplFunc{
-	regTplFunc{
+	// Convert the shorthand https://google.com@TrackLink to {{ TrackLink ... }}.
+	// This is for WYSIWYG editors that encode and break quotes {{ "" }} when inserted
+	// inside <a href="{{ TrackLink "https://these-quotes-break" }}>.
+	{
+		regExp:  regexp.MustCompile(`(https?://.+?)@TrackLink`),
+		replace: `{{ TrackLink "$1" . }}`,
+	},
+
+	// Regular expression for matching {{ TrackLink "http://link.com" }} in the template
+	// and substituting it with {{ Track "http://link.com" . }} (the dot context)
+	// before compilation. This is to make linking easier for users.
+	{
 		regExp:  regexp.MustCompile("{{(\\s+)?TrackLink\\s+?(\"|`)(.+?)(\"|`)(\\s+)?}}"),
 		replace: `{{ TrackLink "$3" . }}`,
 	},
-	regTplFunc{
+	{
 		regExp:  regexp.MustCompile(`{{(\s+)?(TrackView|UnsubscribeURL|OptinURL|MessageURL)(\s+)?}}`),
 		replace: `{{ $2 . }}`,
 	},
@@ -112,17 +128,12 @@ type User struct {
 type Subscriber struct {
 	Base
 
-	UUID        string            `db:"uuid" json:"uuid"`
-	Email       string            `db:"email" json:"email"`
-	Name        string            `db:"name" json:"name"`
-	Attribs     SubscriberAttribs `db:"attribs" json:"attribs"`
-	Status      string            `db:"status" json:"status"`
-	CampaignIDs pq.Int64Array     `db:"campaigns" json:"-"`
-	Lists       types.JSONText    `db:"lists" json:"lists"`
-
-	// Pseudofield for getting the total number of subscribers
-	// in searches and queries.
-	Total int `db:"total" json:"-"`
+	UUID    string            `db:"uuid" json:"uuid"`
+	Email   string            `db:"email" json:"email"`
+	Name    string            `db:"name" json:"name"`
+	Attribs SubscriberAttribs `db:"attribs" json:"attribs"`
+	Status  string            `db:"status" json:"status"`
+	Lists   types.JSONText    `db:"lists" json:"lists"`
 }
 type subLists struct {
 	SubscriberID int            `db:"subscriber_id"`
@@ -201,6 +212,7 @@ type CampaignMeta struct {
 	CampaignID int `db:"campaign_id" json:"-"`
 	Views      int `db:"views" json:"views"`
 	Clicks     int `db:"clicks" json:"clicks"`
+	Bounces    int `db:"bounces" json:"bounces"`
 
 	// This is a list of {list_id, name} pairs unlike Subscriber.Lists[]
 	// because lists can be deleted after a campaign is finished, resulting
@@ -224,6 +236,27 @@ type Template struct {
 	Name      string `db:"name" json:"name"`
 	Body      string `db:"body" json:"body,omitempty"`
 	IsDefault bool   `db:"is_default" json:"is_default"`
+}
+
+// Bounce represents a single bounce event.
+type Bounce struct {
+	ID        int             `db:"id" json:"id"`
+	Type      string          `db:"type" json:"type"`
+	Source    string          `db:"source" json:"source"`
+	Meta      json.RawMessage `db:"meta" json:"meta"`
+	CreatedAt time.Time       `db:"created_at" json:"created_at"`
+
+	// One of these should be provided.
+	Email          string `db:"email" json:"email,omitempty"`
+	SubscriberUUID string `db:"subscriber_uuid" json:"subscriber_uuid,omitempty"`
+	SubscriberID   int    `db:"subscriber_id" json:"subscriber_id,omitempty"`
+
+	CampaignUUID string           `db:"campaign_uuid" json:"campaign_uuid,omitempty"`
+	Campaign     *json.RawMessage `db:"campaign" json:"campaign"`
+
+	// Pseudofield for getting the total number of bounces
+	// in searches and queries.
+	Total int `db:"total" json:"-"`
 }
 
 // markdown is a global instance of Markdown parser and renderer.
@@ -310,6 +343,7 @@ func (camps Campaigns) LoadStats(stmt *sqlx.Stmt) error {
 			camps[i].Lists = c.Lists
 			camps[i].Views = c.Views
 			camps[i].Clicks = c.Clicks
+			camps[i].Bounces = c.Bounces
 		}
 	}
 

@@ -16,6 +16,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/koanf"
 	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/listmonk/internal/bounce"
 	"github.com/knadh/listmonk/internal/buflog"
 	"github.com/knadh/listmonk/internal/i18n"
 	"github.com/knadh/listmonk/internal/manager"
@@ -41,6 +42,7 @@ type App struct {
 	messengers map[string]messenger.Messenger
 	media      media.Store
 	i18n       *i18n.I18n
+	bounce     *bounce.Manager
 	notifTpls  *template.Template
 	log        *log.Logger
 	bufLog     *buflog.BufLog
@@ -68,8 +70,15 @@ var (
 	db      *sqlx.DB
 	queries *Queries
 
+	// Compile-time variables.
 	buildString   string
 	versionString string
+
+	// If these are set in build ldflags and static assets (*.sql, config.toml.sample. ./frontend)
+	// are not embedded (in make dist), these paths are looked up. The default values before, when not
+	// overridden by build flags, are relative to the CWD at runtime.
+	appDir      string = "."
+	frontendDir string = "frontend"
 )
 
 func init() {
@@ -85,11 +94,12 @@ func init() {
 
 	// Generate new config.
 	if ko.Bool("new-config") {
-		if err := newConfigFile(); err != nil {
+		path := ko.Strings("config")[0]
+		if err := newConfigFile(path); err != nil {
 			lo.Println(err)
 			os.Exit(1)
 		}
-		lo.Println("generated config.toml. Edit and run --install")
+		lo.Printf("generated %s. Edit and run --install", path)
 		os.Exit(0)
 	}
 
@@ -106,13 +116,13 @@ func init() {
 
 	// Connect to the database, load the filesystem to read SQL queries.
 	db = initDB()
-	fs = initFS(ko.String("static-dir"), ko.String("i18n-dir"))
+	fs = initFS(appDir, frontendDir, ko.String("static-dir"), ko.String("i18n-dir"))
 
 	// Installer mode? This runs before the SQL queries are loaded and prepared
 	// as the installer needs to work on an empty DB.
 	if ko.Bool("install") {
 		// Save the version of the last listed migration.
-		install(migList[len(migList)-1].version, db, fs, !ko.Bool("yes"))
+		install(migList[len(migList)-1].version, db, fs, !ko.Bool("yes"), ko.Bool("idempotent"))
 		os.Exit(0)
 	}
 
@@ -158,6 +168,11 @@ func main() {
 	app.manager = initCampaignManager(app.queries, app.constants, app)
 	app.importer = initImporter(app.queries, db, app)
 	app.notifTpls = initNotifTemplates("/email-templates/*.html", fs, app.i18n, app.constants)
+
+	if ko.Bool("bounce.enabled") {
+		app.bounce = initBounceManager(app)
+		go app.bounce.Run()
+	}
 
 	// Initialize the default SMTP (`email`) messenger.
 	app.messengers[emailMsgr] = initSMTPMessenger(app.manager)

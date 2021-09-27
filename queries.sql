@@ -30,7 +30,8 @@ SELECT * FROM lists
           ELSE TRUE
     END)
     AND (CASE WHEN $5 != '' THEN subscriber_lists.status = $5::subscription_status END)
-    AND (CASE WHEN $6 != '' THEN lists.optin = $6::list_optin ELSE TRUE END);
+    AND (CASE WHEN $6 != '' THEN lists.optin = $6::list_optin ELSE TRUE END)
+    ORDER BY id;
 
 -- name: get-subscriber-lists-lazy
 -- Get lists associations of subscribers given a list of subscriber IDs.
@@ -132,7 +133,7 @@ INSERT INTO subscriber_lists (subscriber_id, list_id, status)
     VALUES(
         (SELECT id FROM s),
         UNNEST($6),
-        (CASE WHEN $4='blocklisted' THEN 'unsubscribed'::subscription_status ELSE 'unconfirmed' END)
+        (CASE WHEN $4='blocklisted' THEN 'unsubscribed'::subscription_status ELSE $7::subscription_status END)
     )
     ON CONFLICT (subscriber_id, list_id) DO UPDATE
     SET status = (CASE WHEN $4='blocklisted' THEN 'unsubscribed'::subscription_status ELSE subscriber_lists.status END);
@@ -208,13 +209,13 @@ views AS (
     SELECT subject as campaign, COUNT(subscriber_id) as views FROM campaign_views
         LEFT JOIN campaigns ON (campaigns.id = campaign_views.campaign_id)
         WHERE subscriber_id = (SELECT id FROM prof)
-        GROUP BY campaigns.id ORDER BY id
+        GROUP BY campaigns.id ORDER BY campaigns.id
 ),
 clicks AS (
     SELECT url, COUNT(subscriber_id) as clicks FROM link_clicks
         LEFT JOIN links ON (links.id = link_clicks.link_id)
         WHERE subscriber_id = (SELECT id FROM prof)
-        GROUP BY links.id ORDER BY id
+        GROUP BY links.id ORDER BY links.id
 )
 SELECT (SELECT email FROM prof) as email,
         COALESCE((SELECT JSON_AGG(t) FROM prof t), '{}') AS profile,
@@ -233,7 +234,7 @@ SELECT (SELECT email FROM prof) as email,
 -- for pagination in the frontend, albeit being a field that'll repeat
 -- with every resultant row.
 -- %s = arbitrary expression, %s = order by field, %s = order direction
-SELECT COUNT(*) OVER () AS total, subscribers.* FROM subscribers
+SELECT subscribers.* FROM subscribers
     LEFT JOIN subscriber_lists
     ON (
         -- Optional list filtering.
@@ -244,21 +245,40 @@ SELECT COUNT(*) OVER () AS total, subscribers.* FROM subscribers
     %s
     ORDER BY %s %s OFFSET $2 LIMIT (CASE WHEN $3 = 0 THEN NULL ELSE $3 END);
 
+-- name: query-subscribers-count
+-- Replica of query-subscribers for obtaining the results count.
+SELECT COUNT(*) AS total FROM subscribers
+    LEFT JOIN subscriber_lists
+    ON (
+        -- Optional list filtering.
+        (CASE WHEN CARDINALITY($1::INT[]) > 0 THEN true ELSE false END)
+        AND subscriber_lists.subscriber_id = subscribers.id
+    )
+    WHERE subscriber_lists.list_id = ALL($1::INT[]) %s;
+
 -- name: query-subscribers-for-export
 -- raw: true
 -- Unprepared statement for issuring arbitrary WHERE conditions for
 -- searching subscribers to do bulk CSV export.
 -- %s = arbitrary expression
-SELECT s.id, s.uuid, s.email, s.name, s.status, s.attribs, s.created_at, s.updated_at FROM subscribers s
+SELECT subscribers.id,
+       subscribers.uuid,
+       subscribers.email,
+       subscribers.name,
+       subscribers.status,
+       subscribers.attribs,
+       subscribers.created_at,
+       subscribers.updated_at
+       FROM subscribers
     LEFT JOIN subscriber_lists sl
     ON (
         -- Optional list filtering.
         (CASE WHEN CARDINALITY($1::INT[]) > 0 THEN true ELSE false END)
-        AND sl.subscriber_id = s.id
+        AND sl.subscriber_id = subscribers.id
     )
     WHERE sl.list_id = ALL($1::INT[]) AND id > $2
     %s
-    ORDER BY s.id ASC LIMIT (CASE WHEN $3 = 0 THEN NULL ELSE $3 END);
+    ORDER BY subscribers.id ASC LIMIT (CASE WHEN $3 = 0 THEN NULL ELSE $3 END);
 
 -- name: query-subscribers-template
 -- raw: true
@@ -316,7 +336,8 @@ UPDATE subscriber_lists SET status='unsubscribed', updated_at=NOW()
 
 -- lists
 -- name: get-lists
-SELECT * FROM lists WHERE (CASE WHEN $1 = '' THEN 1=1 ELSE type=$1::list_type END) ORDER by name DESC;
+SELECT * FROM lists WHERE (CASE WHEN $1 = '' THEN 1=1 ELSE type=$1::list_type END)
+    ORDER BY CASE WHEN $2 = 'id' THEN id END, CASE WHEN $2 = 'name' THEN name END;
 
 -- name: query-lists
 WITH ls AS (
@@ -324,7 +345,10 @@ WITH ls AS (
     WHERE ($1 = 0 OR id = $1) OFFSET $2 LIMIT (CASE WHEN $3 = 0 THEN NULL ELSE $3 END)
 ),
 counts AS (
-	SELECT COUNT(*) as subscriber_count, list_id FROM subscriber_lists WHERE status != 'unsubscribed' GROUP BY list_id
+	SELECT COUNT(*) as subscriber_count, list_id FROM subscriber_lists
+    WHERE status != 'unsubscribed'
+    AND ($1 = 0 OR list_id = $1)
+    GROUP BY list_id
 )
 SELECT ls.*, COALESCE(subscriber_count, 0) AS subscriber_count FROM ls
     LEFT JOIN counts ON (counts.list_id = ls.id) ORDER BY %s %s;
@@ -361,9 +385,9 @@ DELETE FROM lists WHERE id = ALL($1);
 -- This creates the campaign and inserts campaign_lists relationships.
 WITH campLists AS (
     -- Get the list_ids and their optin statuses for the campaigns found in the previous step.
-    SELECT id AS list_id, campaign_id, optin FROM lists
+    SELECT lists.id AS list_id, campaign_id, optin FROM lists
     INNER JOIN campaign_lists ON (campaign_lists.list_id = lists.id)
-    WHERE id=ANY($13::INT[])
+    WHERE lists.id = ANY($13::INT[])
 ),
 tpl AS (
     -- If there's no template_id given, use the defualt template.
@@ -443,15 +467,22 @@ clicks AS (
     SELECT campaign_id, COUNT(campaign_id) as num FROM link_clicks
     WHERE campaign_id = ANY($1)
     GROUP BY campaign_id
+),
+bounces AS (
+    SELECT campaign_id, COUNT(campaign_id) as num FROM bounces
+    WHERE campaign_id = ANY($1)
+    GROUP BY campaign_id
 )
 SELECT id as campaign_id,
     COALESCE(v.num, 0) AS views,
     COALESCE(c.num, 0) AS clicks,
+    COALESCE(b.num, 0) AS bounces,
     COALESCE(l.lists, '[]') AS lists
 FROM (SELECT id FROM UNNEST($1) AS id) x
 LEFT JOIN lists AS l ON (l.campaign_id = id)
 LEFT JOIN views AS v ON (v.campaign_id = id)
 LEFT JOIN clicks AS c ON (c.campaign_id = id)
+LEFT JOIN bounces AS b ON (b.campaign_id = id)
 ORDER BY ARRAY_POSITION($1, id);
 
 -- name: get-campaign-for-preview
@@ -489,7 +520,7 @@ WITH camps AS (
 ),
 campLists AS (
     -- Get the list_ids and their optin statuses for the campaigns found in the previous step.
-    SELECT id AS list_id, campaign_id, optin FROM lists
+    SELECT lists.id AS list_id, campaign_id, optin FROM lists
     INNER JOIN campaign_lists ON (campaign_lists.list_id = lists.id)
     WHERE campaign_lists.campaign_id = ANY(SELECT id FROM camps)
 ),
@@ -529,6 +560,43 @@ u AS (
 )
 SELECT * FROM camps;
 
+-- name: get-campaign-view-counts
+WITH intval AS (
+    -- For intervals < a week, aggregate counts hourly, otherwise daily.
+    SELECT CASE WHEN (EXTRACT (EPOCH FROM ($3::TIMESTAMP - $2::TIMESTAMP)) / 86400) >= 7 THEN 'day' ELSE 'hour' END
+)
+SELECT campaign_id, COUNT(*) AS "count", DATE_TRUNC((SELECT * FROM intval), created_at) AS "timestamp"
+    FROM campaign_views
+    WHERE campaign_id=ANY($1) AND created_at >= $2 AND created_at <= $3
+    GROUP BY campaign_id, "timestamp" ORDER BY "timestamp" ASC;
+
+-- name: get-campaign-click-counts
+WITH intval AS (
+    -- For intervals < a week, aggregate counts hourly, otherwise daily.
+    SELECT CASE WHEN (EXTRACT (EPOCH FROM ($3::TIMESTAMP - $2::TIMESTAMP)) / 86400) >= 7 THEN 'day' ELSE 'hour' END
+)
+SELECT campaign_id, COUNT(*) AS "count", DATE_TRUNC((SELECT * FROM intval), created_at) AS "timestamp"
+    FROM link_clicks
+    WHERE campaign_id=ANY($1) AND created_at >= $2 AND created_at <= $3
+    GROUP BY campaign_id, "timestamp" ORDER BY "timestamp" ASC;
+
+-- name: get-campaign-bounce-counts
+WITH intval AS (
+    -- For intervals < a week, aggregate counts hourly, otherwise daily.
+    SELECT CASE WHEN (EXTRACT (EPOCH FROM ($3::TIMESTAMP - $2::TIMESTAMP)) / 86400) >= 7 THEN 'day' ELSE 'hour' END
+)
+SELECT campaign_id, COUNT(*) AS "count", DATE_TRUNC((SELECT * FROM intval), created_at) AS "timestamp"
+    FROM bounces
+    WHERE campaign_id=ANY($1) AND created_at >= $2 AND created_at <= $3
+    GROUP BY campaign_id, "timestamp" ORDER BY "timestamp" ASC;
+
+-- name: get-campaign-link-counts
+SELECT COUNT(*) AS "count", url
+    FROM link_clicks
+    LEFT JOIN links ON (link_clicks.link_id = links.id)
+    WHERE campaign_id=ANY($1) AND link_clicks.created_at >= $2 AND link_clicks.created_at <= $3
+    GROUP BY links.url ORDER BY "count" DESC LIMIT 50;
+
 -- name: next-campaign-subscribers
 -- Returns a batch of subscribers in a given campaign starting from the last checkpoint
 -- (last_subscriber_id). Every fetch updates the checkpoint and the sent count, which means
@@ -539,7 +607,7 @@ WITH camps AS (
     WHERE id=$1 AND status='running'
 ),
 campLists AS (
-    SELECT id AS list_id, optin FROM lists
+    SELECT lists.id AS list_id, optin FROM lists
     INNER JOIN campaign_lists ON (campaign_lists.list_id = lists.id)
     WHERE campaign_lists.campaign_id = $1
 ),
@@ -721,26 +789,43 @@ INSERT INTO link_clicks (campaign_id, subscriber_id, link_id) VALUES(
 
 -- name: get-dashboard-charts
 WITH clicks AS (
-    -- Clicks by day for the last 3 months
     SELECT JSON_AGG(ROW_TO_JSON(row))
-    FROM (SELECT COUNT(*) AS count, created_at::DATE as date
-          FROM link_clicks GROUP by date ORDER BY date DESC LIMIT 100
+    FROM (
+        WITH viewDates AS (
+          SELECT TIMEZONE('UTC', created_at)::DATE AS to_date,
+                 TIMEZONE('UTC', created_at)::DATE - INTERVAL '30 DAY' AS from_date
+                 FROM link_clicks ORDER BY id DESC LIMIT 1
+        )
+        SELECT COUNT(*) AS count, created_at::DATE as date FROM link_clicks
+          -- use > between < to force the use of the date index.
+          WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
+          GROUP by date ORDER BY date
     ) row
 ),
 views AS (
-    -- Views by day for the last 3 months
     SELECT JSON_AGG(ROW_TO_JSON(row))
-    FROM (SELECT COUNT(*) AS count, created_at::DATE as date
-          FROM campaign_views GROUP by date ORDER BY date DESC LIMIT 100
+    FROM (
+        WITH viewDates AS (
+          SELECT TIMEZONE('UTC', created_at)::DATE AS to_date,
+                 TIMEZONE('UTC', created_at)::DATE - INTERVAL '30 DAY' AS from_date
+                 FROM campaign_views ORDER BY id DESC LIMIT 1
+        )
+        SELECT COUNT(*) AS count, created_at::DATE as date FROM campaign_views
+          -- use > between < to force the use of the date index.
+          WHERE TIMEZONE('UTC', created_at)::DATE BETWEEN (SELECT from_date FROM viewDates) AND (SELECT to_date FROM viewDates)
+          GROUP by date ORDER BY date
     ) row
 )
 SELECT JSON_BUILD_OBJECT('link_clicks', COALESCE((SELECT * FROM clicks), '[]'),
                         'campaign_views', COALESCE((SELECT * FROM views), '[]'));
 
 -- name: get-dashboard-counts
+WITH subs AS (
+    SELECT COUNT(*) AS num, status FROM subscribers GROUP BY status
+)
 SELECT JSON_BUILD_OBJECT('subscribers', JSON_BUILD_OBJECT(
-                            'total', (SELECT COUNT(*) FROM subscribers),
-                            'blocklisted', (SELECT COUNT(*) FROM subscribers WHERE status='blocklisted'),
+                            'total', (SELECT SUM(num) FROM subs),
+                            'blocklisted', (SELECT num FROM subs WHERE status='blocklisted'),
                             'orphans', (
                                 SELECT COUNT(id) FROM subscribers
                                 LEFT JOIN subscriber_lists ON (subscribers.id = subscriber_lists.subscriber_id)
@@ -773,3 +858,68 @@ SELECT JSON_OBJECT_AGG(key, value) AS settings
 UPDATE settings AS s SET value = c.value
     -- For each key in the incoming JSON map, update the row with the key and its value.
     FROM(SELECT * FROM JSONB_EACH($1)) AS c(key, value) WHERE s.key = c.key;
+
+-- name: record-bounce
+-- Insert a bounce and count the bounces for the subscriber and either unsubscribe them,
+WITH sub AS (
+    SELECT id, status FROM subscribers WHERE CASE WHEN $1 != '' THEN uuid = $1::UUID ELSE email = $2 END
+),
+camp AS (
+    SELECT id FROM campaigns WHERE $3 != '' AND uuid = $3::UUID
+),
+bounce AS (
+    -- Record the bounce if the subscriber is not already blocklisted;
+    INSERT INTO bounces (subscriber_id, campaign_id, type, source, meta, created_at)
+    SELECT (SELECT id FROM sub), (SELECT id FROM camp), $4, $5, $6, $7
+    WHERE NOT EXISTS (SELECT 1 WHERE (SELECT status FROM sub) = 'blocklisted')
+),
+num AS (
+    -- Add a +1 to include the current insertion that is happening.
+    SELECT COUNT(*) + 1 AS num FROM bounces WHERE subscriber_id = (SELECT id FROM sub)
+),
+-- block1 and block2 will run when $8 = 'blocklist' and the number of bounces exceed $8.
+block1 AS (
+    UPDATE subscribers SET status='blocklisted'
+    WHERE $9 = 'blocklist' AND (SELECT num FROM num) >= $8 AND id = (SELECT id FROM sub) AND (SELECT status FROM sub) != 'blocklisted'
+),
+block2 AS (
+    UPDATE subscriber_lists SET status='unsubscribed'
+    WHERE $9 = 'blocklist' AND (SELECT num FROM num) >= $8 AND subscriber_id = (SELECT id FROM sub) AND (SELECT status FROM sub) != 'blocklisted'
+)
+-- This delete  will only run when $9 = 'delete' and the number of bounces exceed $8.
+DELETE FROM subscribers
+    WHERE $9 = 'delete' AND (SELECT num FROM num) >= $8 AND id = (SELECT id FROM sub);
+
+-- name: query-bounces
+SELECT COUNT(*) OVER () AS total,
+    bounces.id,
+    bounces.type,
+    bounces.source,
+    bounces.meta,
+    bounces.created_at,
+    bounces.subscriber_id,
+    subscribers.uuid AS subscriber_uuid,
+    subscribers.email AS email,
+    subscribers.email AS email,
+    (
+        CASE WHEN bounces.campaign_id IS NOT NULL
+        THEN JSON_BUILD_OBJECT('id', bounces.campaign_id, 'name', campaigns.name)
+        ELSE NULL END
+    ) AS campaign
+FROM bounces
+LEFT JOIN subscribers ON (subscribers.id = bounces.subscriber_id)
+LEFT JOIN campaigns ON (campaigns.id = bounces.campaign_id)
+WHERE ($1 = 0 OR bounces.id = $1)
+    AND ($2 = 0 OR bounces.campaign_id = $2)
+    AND ($3 = 0 OR bounces.subscriber_id = $3)
+    AND ($4 = '' OR bounces.source = $4)
+ORDER BY %s %s OFFSET $5 LIMIT $6;
+
+-- name: delete-bounces
+DELETE FROM bounces WHERE ARRAY_LENGTH($1::INT[], 1) IS NULL OR id = ANY($1);
+
+-- name: delete-bounces-by-subscriber
+WITH sub AS (
+    SELECT id FROM subscribers WHERE CASE WHEN $1 > 0 THEN id = $1 ELSE uuid = $2 END
+)
+DELETE FROM bounces WHERE subscriber_id = (SELECT id FROM sub);

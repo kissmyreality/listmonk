@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"html/template"
 	"io"
 	"log"
 	"os"
@@ -43,7 +42,7 @@ type App struct {
 	media      media.Store
 	i18n       *i18n.I18n
 	bounce     *bounce.Manager
-	notifTpls  *template.Template
+	notifTpls  *notifTpls
 	log        *log.Logger
 	bufLog     *buflog.BufLog
 
@@ -189,7 +188,7 @@ func main() {
 
 	// Start the campaign workers. The campaign batches (fetch from DB, push out
 	// messages) get processed at the specified interval.
-	go app.manager.Run(time.Second * 5)
+	go app.manager.Run()
 
 	// Start the app server.
 	srv := initHTTPServer(app)

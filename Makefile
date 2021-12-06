@@ -34,7 +34,7 @@ $(STUFFBIN):
 
 $(FRONTEND_YARN_MODULES): frontend/package.json frontend/yarn.lock
 	cd frontend && $(YARN) install
-	touch --no-create $(FRONTEND_YARN_MODULES)
+	touch -c $(FRONTEND_YARN_MODULES)
 
 # Build the backend to ./listmonk.
 $(BIN): $(shell find . -type f -name "*.go")
@@ -48,7 +48,7 @@ run:
 # Build the JS frontend into frontend/dist.
 $(FRONTEND_DIST): $(FRONTEND_DEPS)
 	export VUE_APP_VERSION="${VERSION}" && cd frontend && $(YARN) build
-	touch --no-create $(FRONTEND_DIST)
+	touch -c $(FRONTEND_DIST)
 
 
 .PHONY: build-frontend
@@ -72,7 +72,7 @@ dist: $(STUFFBIN) build build-frontend pack-bin
 # pack-releases runns stuffbin packing on the given binary. This is used
 # in the .goreleaser post-build hook.
 .PHONY: pack-bin
-pack-bin: $(STUFFBIN)
+pack-bin: build-frontend $(BIN) $(STUFFBIN)
 	$(STUFFBIN) -a stuff -in ${BIN} -out ${BIN} ${STATIC}
 
 # Use goreleaser to do a dry run producing local builds.
@@ -84,3 +84,32 @@ release-dry:
 .PHONY: release
 release:
 	goreleaser --parallelism 1 --rm-dist --skip-validate
+
+# Build local docker images for development.
+.PHONY: build-dev-docker
+build-dev-docker: build ## Build docker containers for the entire suite (Front/Core/PG).
+	cd dev; \
+	docker-compose build ; \
+
+# Spin a local docker suite for local development.
+.PHONY: dev-docker
+dev-docker: build-dev-docker ## Build and spawns docker containers for the entire suite (Front/Core/PG).
+	cd dev; \
+	docker-compose up
+
+# Run the backend in docker-dev mode. The frontend assets in dev mode are loaded from disk from frontend/dist.
+.PHONY: run-backend-docker
+run-backend-docker:
+	CGO_ENABLED=0 go run -ldflags="-s -w -X 'main.buildString=${BUILDSTR}' -X 'main.versionString=${VERSION}' -X 'main.frontendDir=frontend/dist'" cmd/*.go --config=dev/config.toml
+
+# Tear down the complete local development docker suite.
+.PHONY: rm-dev-docker
+rm-dev-docker: build ## Delete the docker containers including DB volumes.
+	cd dev; \
+	docker-compose down -v ; \
+
+# Setup the db for local dev docker suite.
+.PHONY: init-dev-docker
+init-dev-docker: build-dev-docker ## Delete the docker containers including DB volumes.
+	cd dev; \
+	docker-compose run --rm backend sh -c "make dist && yes | ./listmonk --install --config dev/config.toml"

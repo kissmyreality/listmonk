@@ -16,7 +16,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/jmoiron/sqlx"
 	"github.com/knadh/listmonk/models"
-	"github.com/labstack/echo"
+	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	null "gopkg.in/volatiletech/null.v6"
 )
@@ -67,7 +67,8 @@ type campaignStats struct {
 	Sent      int       `db:"sent" json:"sent"`
 	Started   null.Time `db:"started_at" json:"started_at"`
 	UpdatedAt null.Time `db:"updated_at" json:"updated_at"`
-	Rate      float64   `json:"rate"`
+	Rate      int       `json:"rate"`
+	NetRate   int       `json:"net_rate"`
 }
 
 type campsWrap struct {
@@ -102,13 +103,13 @@ func handleGetCampaigns(c echo.Context) error {
 		noBody, _ = strconv.ParseBool(c.QueryParam("no_body"))
 	)
 
-	// Fetch one list.
+	// Fetch one campaign.
 	single := false
 	if id > 0 {
 		single = true
 	}
 
-	queryStr, stmt := makeCampaignQuery(query, orderBy, order, app.queries.QueryCampaigns)
+	queryStr, stmt := makeSearchQuery(query, orderBy, order, app.queries.QueryCampaigns)
 
 	// Unsafe to ignore scanning fields not present in models.Campaigns.
 	if err := db.Select(&out.Results, stmt, id, pq.StringArray(status), queryStr, pg.Offset, pg.Limit); err != nil {
@@ -292,6 +293,7 @@ func handleCreateCampaign(c echo.Context) error {
 		o.AltBody,
 		o.ContentType,
 		o.SendAt,
+		o.Headers,
 		pq.StringArray(normalizeTags(o.Tags)),
 		o.Messenger,
 		o.TemplateID,
@@ -366,6 +368,7 @@ func handleUpdateCampaign(c echo.Context) error {
 		o.ContentType,
 		o.SendAt,
 		o.SendLater,
+		o.Headers,
 		pq.StringArray(normalizeTags(o.Tags)),
 		o.Messenger,
 		o.TemplateID,
@@ -520,17 +523,21 @@ func handleGetRunningCampaignStats(c echo.Context) error {
 	// Compute rate.
 	for i, c := range out {
 		if c.Started.Valid && c.UpdatedAt.Valid {
-			diff := c.UpdatedAt.Time.Sub(c.Started.Time).Minutes()
-			if diff > 0 {
-				var (
-					sent = float64(c.Sent)
-					rate = sent / diff
-				)
-				if rate > sent || rate > float64(c.ToSend) {
-					rate = sent
-				}
-				out[i].Rate = rate
+			diff := int(c.UpdatedAt.Time.Sub(c.Started.Time).Minutes())
+			if diff < 1 {
+				diff = 1
 			}
+
+			rate := c.Sent / diff
+			if rate > c.Sent || rate > c.ToSend {
+				rate = c.Sent
+			}
+
+			// Rate since the starting of the campaign.
+			out[i].NetRate = rate
+
+			// Realtime running rate over the last minute.
+			out[i].Rate = app.manager.GetCampaignStats(c.ID).SendRate
 		}
 	}
 
@@ -603,6 +610,7 @@ func handleTestCampaign(c echo.Context) error {
 	camp.AltBody = req.AltBody
 	camp.Messenger = req.Messenger
 	camp.ContentType = req.ContentType
+	camp.Headers = req.Headers
 	camp.TemplateID = req.TemplateID
 
 	// Send the test messages.
@@ -736,6 +744,10 @@ func validateCampaignFields(c campaignReq, app *App) (campaignReq, error) {
 		return c, errors.New(app.i18n.Ts("campaigns.fieldInvalidBody", "error", err.Error()))
 	}
 
+	if len(c.Headers) == 0 {
+		c.Headers = make([]map[string]string, 0)
+	}
+
 	return c, nil
 }
 
@@ -791,9 +803,10 @@ func makeOptinCampaignMessage(o campaignReq, app *App) (campaignReq, error) {
 	return o, nil
 }
 
-// makeCampaignQuery cleans an optional campaign search string and prepares the
-// campaign SQL statement (string) and returns them.
-func makeCampaignQuery(q, orderBy, order, query string) (string, string) {
+// makeSearchQuery cleans an optional search string and prepares the
+// query SQL statement (string interpolated) and returns the
+// search query string along with the SQL expression.
+func makeSearchQuery(q, orderBy, order, query string) (string, string) {
 	if q != "" {
 		q = `%` + string(regexFullTextQuery.ReplaceAll([]byte(q), []byte("&"))) + `%`
 	}

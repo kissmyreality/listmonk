@@ -15,7 +15,7 @@ import (
 	"github.com/gofrs/uuid"
 	"github.com/knadh/listmonk/internal/subimporter"
 	"github.com/knadh/listmonk/models"
-	"github.com/labstack/echo"
+	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 )
 
@@ -31,6 +31,7 @@ type subQueryReq struct {
 	TargetListIDs pq.Int64Array `json:"target_list_ids"`
 	SubscriberIDs pq.Int64Array `json:"ids"`
 	Action        string        `json:"action"`
+	Status        string        `json:"status"`
 }
 
 type subsWrap struct {
@@ -65,6 +66,7 @@ type subOptin struct {
 	*models.Subscriber
 
 	OptinURL string
+	UnsubURL string
 	Lists    []models.List
 }
 
@@ -367,10 +369,6 @@ func handleUpdateSubscriber(c echo.Context) error {
 		return err
 	}
 
-	if !req.PreconfirmSubs && app.constants.SendOptinConfirmation {
-		_, _ = sendOptinConfirmation(sub, []int64(req.Lists), app)
-	}
-
 	return c.JSON(http.StatusOK, okResp{sub})
 }
 
@@ -479,7 +477,7 @@ func handleManageSubscriberLists(c echo.Context) error {
 	var err error
 	switch req.Action {
 	case "add":
-		_, err = app.queries.AddSubscribersToLists.Exec(IDs, req.TargetListIDs)
+		_, err = app.queries.AddSubscribersToLists.Exec(IDs, req.TargetListIDs, req.Status)
 	case "remove":
 		_, err = app.queries.DeleteSubscriptions.Exec(IDs, req.TargetListIDs)
 	case "unsubscribe":
@@ -834,6 +832,7 @@ func sendOptinConfirmation(sub models.Subscriber, listIDs []int64, app *App) (in
 		qListIDs.Add("l", l.UUID)
 	}
 	out.OptinURL = fmt.Sprintf(app.constants.OptinURL, sub.UUID, qListIDs.Encode())
+	out.UnsubURL = fmt.Sprintf(app.constants.UnsubURL, dummyUUID, sub.UUID)
 
 	// Send the e-mail.
 	if err := app.sendNotification([]string{sub.Email},

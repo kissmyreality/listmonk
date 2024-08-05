@@ -2,31 +2,20 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/knadh/listmonk/models"
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 )
-
-type bouncesWrap struct {
-	Results []models.Bounce `json:"results"`
-
-	Total   int `json:"total"`
-	PerPage int `json:"per_page"`
-	Page    int `json:"page"`
-}
 
 // handleGetBounces handles retrieval of bounce records.
 func handleGetBounces(c echo.Context) error {
 	var (
 		app = c.Get("app").(*App)
-		pg  = getPagination(c.QueryParams(), 50)
-		out bouncesWrap
+		pg  = app.paginator.NewFromURL(c.Request().URL.Query())
 
 		id, _     = strconv.Atoi(c.Param("id"))
 		campID, _ = strconv.Atoi(c.QueryParam("campaign_id"))
@@ -35,38 +24,30 @@ func handleGetBounces(c echo.Context) error {
 		order     = c.FormValue("order")
 	)
 
-	// Fetch one list.
-	single := false
+	// Fetch one bounce.
 	if id > 0 {
-		single = true
+		out, err := app.core.GetBounce(id)
+		if err != nil {
+			return err
+		}
+		return c.JSON(http.StatusOK, okResp{out})
 	}
 
-	// Sort params.
-	if !strSliceContains(orderBy, bounceQuerySortFields) {
-		orderBy = "created_at"
-	}
-	if order != sortAsc && order != sortDesc {
-		order = sortDesc
+	res, total, err := app.core.QueryBounces(campID, 0, source, orderBy, order, pg.Offset, pg.Limit)
+	if err != nil {
+		return err
 	}
 
-	stmt := fmt.Sprintf(app.queries.QueryBounces, orderBy, order)
-	if err := db.Select(&out.Results, stmt, id, campID, 0, source, pg.Offset, pg.Limit); err != nil {
-		app.log.Printf("error fetching bounces: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorFetching",
-				"name", "{globals.terms.bounce}", "error", pqErrMsg(err)))
-	}
-	if len(out.Results) == 0 {
+	// No results.
+	var out models.PageResults
+	if len(res) == 0 {
 		out.Results = []models.Bounce{}
 		return c.JSON(http.StatusOK, okResp{out})
 	}
 
-	if single {
-		return c.JSON(http.StatusOK, okResp{out.Results[0]})
-	}
-
 	// Meta.
-	out.Total = out.Results[0].Total
+	out.Results = res
+	out.Total = total
 	out.Page = pg.Page
 	out.PerPage = pg.PerPage
 
@@ -76,22 +57,17 @@ func handleGetBounces(c echo.Context) error {
 // handleGetSubscriberBounces retrieves a subscriber's bounce records.
 func handleGetSubscriberBounces(c echo.Context) error {
 	var (
-		app   = c.Get("app").(*App)
-		subID = c.Param("id")
+		app      = c.Get("app").(*App)
+		subID, _ = strconv.Atoi(c.Param("id"))
 	)
 
-	id, _ := strconv.ParseInt(subID, 10, 64)
-	if id < 1 {
+	if subID < 1 {
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidID"))
 	}
 
-	out := []models.Bounce{}
-	stmt := fmt.Sprintf(app.queries.QueryBounces, "created_at", "ASC")
-	if err := db.Select(&out, stmt, 0, 0, subID, "", 0, 1000); err != nil {
-		app.log.Printf("error fetching bounces: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorFetching",
-				"name", "{globals.terms.bounce}", "error", pqErrMsg(err)))
+	out, _, err := app.core.QueryBounces(0, subID, "", "", "", 0, 1000)
+	if err != nil {
+		return err
 	}
 
 	return c.JSON(http.StatusOK, okResp{out})
@@ -103,12 +79,12 @@ func handleDeleteBounces(c echo.Context) error {
 		app    = c.Get("app").(*App)
 		pID    = c.Param("id")
 		all, _ = strconv.ParseBool(c.QueryParam("all"))
-		IDs    = pq.Int64Array{}
+		IDs    = []int{}
 	)
 
 	// Is it an /:id call?
 	if pID != "" {
-		id, _ := strconv.ParseInt(pID, 10, 64)
+		id, _ := strconv.Atoi(pID)
 		if id < 1 {
 			return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidID"))
 		}
@@ -128,11 +104,8 @@ func handleDeleteBounces(c echo.Context) error {
 		IDs = i
 	}
 
-	if _, err := app.queries.DeleteBounces.Exec(IDs); err != nil {
-		app.log.Printf("error deleting bounces: %v", err)
-		return echo.NewHTTPError(http.StatusInternalServerError,
-			app.i18n.Ts("globals.messages.errorDeleting",
-				"name", "{globals.terms.bounce}", "error", pqErrMsg(err)))
+	if err := app.core.DeleteBounces(IDs); err != nil {
+		return err
 	}
 
 	return c.JSON(http.StatusOK, okResp{true})
@@ -147,8 +120,8 @@ func handleBounceWebhook(c echo.Context) error {
 		bounces []models.Bounce
 	)
 
-	// Read the request body instead of using using c.Bind() to read to save the entire raw request as meta.
-	rawReq, err := ioutil.ReadAll(c.Request().Body)
+	// Read the request body instead of using c.Bind() to read to save the entire raw request as meta.
+	rawReq, err := io.ReadAll(c.Request().Body)
 	if err != nil {
 		app.log.Printf("error reading ses notification body: %v", err)
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.internalError"))
@@ -159,7 +132,7 @@ func handleBounceWebhook(c echo.Context) error {
 	case service == "":
 		var b models.Bounce
 		if err := json.Unmarshal(rawReq, &b); err != nil {
-			return echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.invalidData"))
+			return echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.invalidData")+":"+err.Error())
 		}
 
 		if bv, err := validateBounceFields(b, app); err != nil {
@@ -218,6 +191,19 @@ func handleBounceWebhook(c echo.Context) error {
 		}
 		bounces = append(bounces, bs...)
 
+	// Postmark.
+	case service == "postmark" && app.constants.BouncePostmarkEnabled:
+		bs, err := app.bounce.Postmark.ProcessBounce(rawReq, c)
+		if err != nil {
+			app.log.Printf("error processing postmark notification: %v", err)
+			if _, ok := err.(*echo.HTTPError); ok {
+				return err
+			}
+
+			return echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidData"))
+		}
+		bounces = append(bounces, bs...)
+
 	default:
 		return echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("bounces.unknownService"))
 	}
@@ -234,11 +220,11 @@ func handleBounceWebhook(c echo.Context) error {
 
 func validateBounceFields(b models.Bounce, app *App) (models.Bounce, error) {
 	if b.Email == "" && b.SubscriberUUID == "" {
-		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidData"))
+		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.invalidFields", "name", "email / subscriber_uuid"))
 	}
 
 	if b.SubscriberUUID != "" && !reUUID.MatchString(b.SubscriberUUID) {
-		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidUUID"))
+		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.invalidFields", "name", "subscriber_uuid"))
 	}
 
 	if b.Email != "" {
@@ -249,8 +235,8 @@ func validateBounceFields(b models.Bounce, app *App) (models.Bounce, error) {
 		b.Email = em
 	}
 
-	if b.Type != models.BounceTypeHard && b.Type != models.BounceTypeSoft {
-		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.T("globals.messages.invalidData"))
+	if b.Type != models.BounceTypeHard && b.Type != models.BounceTypeSoft && b.Type != models.BounceTypeComplaint {
+		return b, echo.NewHTTPError(http.StatusBadRequest, app.i18n.Ts("globals.messages.invalidFields", "name", "type"))
 	}
 
 	return b, nil

@@ -9,109 +9,115 @@ const routes = [
     path: '/404',
     name: '404_page',
     meta: { title: '404' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/404.vue'),
+    component: () => import('../views/404.vue'),
   },
   {
     path: '/',
     name: 'dashboard',
-    meta: { title: 'Dashboard' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Dashboard.vue'),
+    meta: { title: '' },
+    component: () => import('../views/Dashboard.vue'),
   },
   {
     path: '/lists',
     name: 'lists',
-    meta: { title: 'Lists', group: 'lists' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Lists.vue'),
+    meta: { title: 'globals.terms.lists', group: 'lists' },
+    component: () => import('../views/Lists.vue'),
   },
   {
     path: '/lists/forms',
     name: 'forms',
-    meta: { title: 'Forms', group: 'lists' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Forms.vue'),
+    meta: { title: 'forms.title', group: 'lists' },
+    component: () => import('../views/Forms.vue'),
   },
   {
     path: '/lists/:id',
-    name: 'lists',
-    meta: { title: 'Lists', group: 'lists' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Lists.vue'),
+    name: 'list',
+    meta: { title: 'globals.terms.lists', group: 'lists' },
+    component: () => import('../views/Lists.vue'),
   },
   {
     path: '/subscribers',
     name: 'subscribers',
-    meta: { title: 'Subscribers', group: 'subscribers' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Subscribers.vue'),
+    meta: { title: 'globals.terms.subscribers', group: 'subscribers' },
+    component: () => import('../views/Subscribers.vue'),
   },
   {
     path: '/subscribers/import',
     name: 'import',
-    meta: { title: 'Import subscribers', group: 'subscribers' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Import.vue'),
+    meta: { title: 'import.title', group: 'subscribers' },
+    component: () => import('../views/Import.vue'),
   },
   {
     path: '/subscribers/bounces',
     name: 'bounces',
-    meta: { title: 'Bounces', group: 'subscribers' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Bounces.vue'),
+    meta: { title: 'globals.terms.bounces', group: 'subscribers' },
+    component: () => import('../views/Bounces.vue'),
   },
   {
     path: '/subscribers/lists/:listID',
     name: 'subscribers_list',
-    meta: { title: 'Subscribers', group: 'subscribers' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Subscribers.vue'),
+    meta: { title: 'globals.terms.subscribers', group: 'subscribers' },
+    component: () => import('../views/Subscribers.vue'),
   },
   {
     path: '/subscribers/:id',
     name: 'subscriber',
-    meta: { title: 'Subscribers', group: 'subscribers' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Subscribers.vue'),
+    meta: { title: 'globals.terms.subscribers', group: 'subscribers' },
+    component: () => import('../views/Subscribers.vue'),
   },
   {
     path: '/campaigns',
     name: 'campaigns',
-    meta: { title: 'Campaigns', group: 'campaigns' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Campaigns.vue'),
+    meta: { title: 'globals.terms.campaigns', group: 'campaigns' },
+    component: () => import('../views/Campaigns.vue'),
   },
   {
     path: '/campaigns/media',
     name: 'media',
-    meta: { title: 'Media', group: 'campaigns' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Media.vue'),
+    meta: { title: 'globals.terms.media', group: 'campaigns' },
+    component: () => import('../views/Media.vue'),
   },
   {
     path: '/campaigns/templates',
     name: 'templates',
-    meta: { title: 'Templates', group: 'campaigns' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Templates.vue'),
+    meta: { title: 'globals.terms.templates', group: 'campaigns' },
+    component: () => import('../views/Templates.vue'),
   },
   {
     path: '/campaigns/analytics',
     name: 'campaignAnalytics',
-    meta: { title: 'Campaign analytics', group: 'campaigns' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/CampaignAnalytics.vue'),
+    meta: { title: 'analytics.title', group: 'campaigns' },
+    component: () => import('../views/CampaignAnalytics.vue'),
   },
   {
     path: '/campaigns/:id',
     name: 'campaign',
-    meta: { title: 'Campaign', group: 'campaigns' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Campaign.vue'),
+    meta: { title: 'globals.terms.campaign', group: 'campaigns' },
+    component: () => import('../views/Campaign.vue'),
   },
   {
     path: '/settings',
     name: 'settings',
-    meta: { title: 'Settings', group: 'settings' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Settings.vue'),
+    meta: { title: 'globals.terms.settings', group: 'settings' },
+    component: () => import('../views/Settings.vue'),
   },
   {
     path: '/settings/logs',
     name: 'logs',
-    meta: { title: 'Logs', group: 'settings' },
-    component: () => import(/* webpackChunkName: "main" */ '../views/Logs.vue'),
+    meta: { title: 'logs.title', group: 'settings' },
+    component: () => import('../views/Logs.vue'),
+  },
+  {
+    path: '/settings/maintenance',
+    name: 'maintenance',
+    meta: { title: 'maintenance.title', group: 'settings' },
+    component: () => import('../views/Maintenance.vue'),
   },
 ];
 
 const router = new VueRouter({
   mode: 'history',
-  base: process.env.BASE_URL,
+  base: import.meta.env.BASE_URL,
   routes,
 
   scrollBehavior(to) {
@@ -120,20 +126,6 @@ const router = new VueRouter({
     }
     return { x: 0, y: 0 };
   },
-});
-
-router.beforeEach((to, from, next) => {
-  if (to.matched.length === 0) {
-    next('/404');
-  } else {
-    next();
-  }
-});
-
-router.afterEach((to) => {
-  Vue.nextTick(() => {
-    document.title = `${to.meta.title} / listmonk`;
-  });
 });
 
 export default router;

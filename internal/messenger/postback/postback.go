@@ -5,37 +5,46 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
+	"net/textproto"
 	"time"
 
-	"github.com/knadh/listmonk/internal/messenger"
 	"github.com/knadh/listmonk/models"
 )
 
 // postback is the payload that's posted as JSON to the HTTP Postback server.
+//
 //easyjson:json
 type postback struct {
-	Subject     string      `json:"subject"`
-	ContentType string      `json:"content_type"`
-	Body        string      `json:"body"`
-	Recipients  []recipient `json:"recipients"`
-	Campaign    *campaign   `json:"campaign"`
+	Subject     string       `json:"subject"`
+	FromEmail   string       `json:"from_email"`
+	ContentType string       `json:"content_type"`
+	Body        string       `json:"body"`
+	Recipients  []recipient  `json:"recipients"`
+	Campaign    *campaign    `json:"campaign"`
+	Attachments []attachment `json:"attachments"`
 }
 
 type campaign struct {
-	UUID    string         `db:"uuid" json:"uuid"`
-	Name    string         `db:"name" json:"name"`
-	Headers models.Headers `db:"headers" json:"headers"`
-	Tags    []string       `db:"tags" json:"tags"`
+	FromEmail string         `json:"from_email"`
+	UUID      string         `json:"uuid"`
+	Name      string         `json:"name"`
+	Headers   models.Headers `json:"headers"`
+	Tags      []string       `json:"tags"`
 }
 
 type recipient struct {
-	UUID    string                   `db:"uuid" json:"uuid"`
-	Email   string                   `db:"email" json:"email"`
-	Name    string                   `db:"name" json:"name"`
-	Attribs models.SubscriberAttribs `db:"attribs" json:"attribs"`
-	Status  string                   `db:"status" json:"status"`
+	UUID    string      `json:"uuid"`
+	Email   string      `json:"email"`
+	Name    string      `json:"name"`
+	Attribs models.JSON `json:"attribs"`
+	Status  string      `json:"status"`
+}
+
+type attachment struct {
+	Name    string               `json:"name"`
+	Header  textproto.MIMEHeader `json:"header"`
+	Content []byte               `json:"content"`
 }
 
 // Options represents HTTP Postback server options.
@@ -85,9 +94,10 @@ func (p *Postback) Name() string {
 }
 
 // Push pushes a message to the server.
-func (p *Postback) Push(m messenger.Message) error {
+func (p *Postback) Push(m models.Message) error {
 	pb := postback{
 		Subject:     m.Subject,
+		FromEmail:   m.From,
 		ContentType: m.ContentType,
 		Body:        string(m.Body),
 		Recipients: []recipient{{
@@ -101,11 +111,26 @@ func (p *Postback) Push(m messenger.Message) error {
 
 	if m.Campaign != nil {
 		pb.Campaign = &campaign{
-			UUID:    m.Campaign.UUID,
-			Name:    m.Campaign.Name,
-			Headers: m.Campaign.Headers,
-			Tags:    m.Campaign.Tags,
+			FromEmail: m.Campaign.FromEmail,
+			UUID:      m.Campaign.UUID,
+			Name:      m.Campaign.Name,
+			Headers:   m.Campaign.Headers,
+			Tags:      m.Campaign.Tags,
 		}
+	}
+
+	if len(m.Attachments) > 0 {
+		files := make([]attachment, 0, len(m.Attachments))
+		for _, f := range m.Attachments {
+			a := attachment{
+				Name:    f.Name,
+				Header:  f.Header,
+				Content: make([]byte, len(f.Content)),
+			}
+			copy(a.Content, f.Content)
+			files = append(files, a)
+		}
+		pb.Attachments = files
 	}
 
 	b, err := pb.MarshalJSON()
@@ -173,7 +198,7 @@ func (p *Postback) exec(method, rURL string, reqBody []byte, headers http.Header
 	}
 	defer func() {
 		// Drain and close the body to let the Transport reuse the connection
-		io.Copy(ioutil.Discard, r.Body)
+		io.Copy(io.Discard, r.Body)
 		r.Body.Close()
 	}()
 

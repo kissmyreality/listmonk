@@ -6,12 +6,18 @@ import (
 	"math/rand"
 	"net/smtp"
 	"net/textproto"
+	"strings"
 
-	"github.com/knadh/listmonk/internal/messenger"
+	"github.com/knadh/listmonk/models"
 	"github.com/knadh/smtppool"
 )
 
-const emName = "email"
+const (
+	emName        = "email"
+	hdrReturnPath = "Return-Path"
+	hdrBcc        = "Bcc"
+	hdrCc         = "Cc"
+)
 
 // Server represents an SMTP server's credentials.
 type Server struct {
@@ -34,7 +40,7 @@ type Emailer struct {
 	servers []*Server
 }
 
-// New returns an SMTP e-mail Messenger backend with a the given SMTP servers.
+// New returns an SMTP e-mail Messenger backend with the given SMTP servers.
 func New(servers ...Server) (*Emailer, error) {
 	e := &Emailer{
 		servers: make([]*Server, 0, len(servers)),
@@ -89,7 +95,7 @@ func (e *Emailer) Name() string {
 }
 
 // Push pushes a message to the server.
-func (e *Emailer) Push(m messenger.Message) error {
+func (e *Emailer) Push(m models.Message) error {
 	// If there are more than one SMTP servers, send to a random
 	// one from the list.
 	var (
@@ -125,17 +131,39 @@ func (e *Emailer) Push(m messenger.Message) error {
 	}
 
 	em.Headers = textproto.MIMEHeader{}
-	// Attach e-mail level headers.
-	if len(m.Headers) > 0 {
-		em.Headers = m.Headers
-	}
 
 	// Attach SMTP level headers.
-	if len(srv.EmailHeaders) > 0 {
-		for k, v := range srv.EmailHeaders {
-			em.Headers.Set(k, v)
-		}
+	for k, v := range srv.EmailHeaders {
+		em.Headers.Set(k, v)
 	}
+
+	// Attach e-mail level headers.
+	for k, v := range m.Headers {
+		em.Headers.Set(k, v[0])
+	}
+
+	// If the `Return-Path` header is set, it should be set as the
+	// the SMTP envelope sender (via the Sender field of the email struct).
+	if sender := em.Headers.Get(hdrReturnPath); sender != "" {
+		em.Sender = sender
+		em.Headers.Del(hdrReturnPath)
+	}
+
+	// If the `Bcc` header is set, it should be set on the Envelope
+	if bcc := em.Headers.Get(hdrBcc); bcc != "" {
+		for _, part := range strings.Split(bcc, ",") {
+			em.Bcc = append(em.Bcc, strings.TrimSpace(part))
+		}
+		em.Headers.Del(hdrBcc)
+	}	
+
+	// If the `Cc` header is set, it should be set on the Envelope
+	if cc := em.Headers.Get(hdrCc); cc != "" {
+		for _, part := range strings.Split(cc, ",") {
+			em.Cc = append(em.Cc, strings.TrimSpace(part))
+		}
+		em.Headers.Del(hdrCc)
+	}	
 
 	switch m.ContentType {
 	case "plain":

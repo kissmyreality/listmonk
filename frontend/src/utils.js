@@ -4,7 +4,9 @@ import {
 } from 'buefy';
 import dayjs from 'dayjs';
 import relativeTime from 'dayjs/plugin/relativeTime';
+import updateLocale from 'dayjs/plugin/updateLocale';
 
+dayjs.extend(updateLocale);
 dayjs.extend(relativeTime);
 
 const reEmail = /(.+?)@(.+?)/ig;
@@ -25,7 +27,29 @@ export default class Utils {
   constructor(i18n) {
     this.i18n = i18n;
     this.intlNumFormat = new Intl.NumberFormat();
+
+    if (i18n) {
+      dayjs.updateLocale('en', {
+        relativeTime: {
+          future: '%s',
+          past: '%s',
+          s: `${i18n.tc('globals.terms.second', 2)}`,
+          m: `1 ${i18n.tc('globals.terms.minute', 1)}`,
+          mm: `%d ${i18n.tc('globals.terms.minute', 2)}`,
+          h: `1 ${i18n.tc('globals.terms.hour', 1)}`,
+          hh: `%d ${i18n.tc('globals.terms.hour', 2)}`,
+          d: `1 ${i18n.tc('globals.terms.day', 1)}`,
+          dd: `%d ${i18n.tc('globals.terms.day', 2)}`,
+          M: `1 ${i18n.tc('globals.terms.month', 1)}`,
+          MM: `%d ${i18n.tc('globals.terms.month', 2)}`,
+          y: `${i18n.tc('globals.terms.year', 1)}`,
+          yy: `%d ${i18n.tc('globals.terms.year', 2)}`,
+        },
+      });
+    }
   }
+
+  getDate = (d) => dayjs(d);
 
   // Parses an ISO timestamp to a simpler form.
   niceDate = (stamp, showTime) => {
@@ -34,7 +58,7 @@ export default class Utils {
     }
 
     const d = dayjs(stamp);
-    const day = this.i18n.t(`globals.days.${d.day()}`);
+    const day = this.i18n.t(`globals.days.${d.day() + 1}`);
     const month = this.i18n.t(`globals.months.${d.month() + 1}`);
     let out = d.format(`[${day},] DD [${month}] YYYY`);
     if (showTime) {
@@ -77,7 +101,7 @@ export default class Utils {
     }
 
     return out.toFixed(2) + pfx;
-  }
+  };
 
   formatNumber(v) {
     return this.intlNumFormat.format(v);
@@ -98,7 +122,7 @@ export default class Utils {
     }
 
     return ids.map((id) => parseInt(id, 10));
-  }
+  };
 
   // https://stackoverflow.com/a/12034334
   escapeHTML = (html) => html.replace(/[&<>"'`=/]/g, (s) => htmlEntities[s]);
@@ -109,7 +133,7 @@ export default class Utils {
   confirm = (msg, onConfirm, onCancel) => {
     Dialog.confirm({
       scroll: 'keep',
-      message: !msg ? this.i18n.t('globals.messages.confirm') : msg,
+      message: !msg ? this.i18n.t('globals.messages.confirm') : this.escapeHTML(msg),
       confirmText: this.i18n.t('globals.buttons.ok'),
       cancelText: this.i18n.t('globals.buttons.cancel'),
       onConfirm,
@@ -117,12 +141,14 @@ export default class Utils {
     });
   };
 
-  prompt = (msg, inputAttrs, onConfirm, onCancel) => {
+  prompt = (msg, inputAttrs, onConfirm, onCancel, params) => {
+    const p = params || {};
+
     Dialog.prompt({
       scroll: 'keep',
-      message: msg,
-      confirmText: this.i18n.t('globals.buttons.ok'),
-      cancelText: this.i18n.t('globals.buttons.cancel'),
+      message: this.escapeHTML(msg),
+      confirmText: p.confirmText || this.i18n.t('globals.buttons.ok'),
+      cancelText: p.cancelText || this.i18n.t('globals.buttons.cancel'),
       inputAttrs: {
         type: 'string',
         maxlength: 200,
@@ -134,11 +160,11 @@ export default class Utils {
     });
   };
 
-  toast = (msg, typ, duration) => {
+  toast = (msg, typ, duration, queue) => {
     Toast.open({
       message: this.escapeHTML(msg),
       type: !typ ? 'is-success' : typ,
-      queue: false,
+      queue,
       duration: duration || 3000,
       position: 'is-top',
       pauseOnHover: true,
@@ -152,7 +178,7 @@ export default class Utils {
   camelString = (str) => {
     const s = str.replace(/[-_\s]+(.)?/g, (match, chr) => (chr ? chr.toUpperCase() : ''));
     return s.substr(0, 1).toLowerCase() + s.substr(1);
-  }
+  };
 
   // camelKeys recursively camelCases all keys in a given object (array or {}).
   // For each key it traverses, it passes a dot separated key path to an optional testFunc() bool.
@@ -207,5 +233,5 @@ export default class Utils {
 
     p[key] = val;
     localStorage.setItem(prefKey, JSON.stringify(p));
-  }
+  };
 }

@@ -3,6 +3,7 @@
 | Method | Endpoint                                        | Description               |
 |:-------|:------------------------------------------------|:--------------------------|
 | GET    | [/api/lists](#get-apilists)                     | Retrieve all lists.       |
+| GET    | [/api/public/lists](#get-public-apilists)       | Retrieve public lists.|
 | GET    | [/api/lists/{list_id}](#get-apilistslist_id)    | Retrieve a specific list. |
 | POST   | [/api/lists](#post-apilists)                    | Create a new list.        |
 | PUT    | [/api/lists/{list_id}](#put-apilistslist_id)    | Update a list.            |
@@ -20,7 +21,7 @@ Retrieve lists.
 |:---------|:---------|:---------|:-----------------------------------------------------------------|
 | query    | string   |          | string for list name search.                                     |
 | status   | []string |          | Status to filter lists. Repeat in the query for multiple values. |
-| tags     | []string |          | Tags to filter lists. Repeat in the query for multiple values.   |
+| tag      | []string |          | Tags to filter lists. Repeat in the query for multiple values.   |
 | order_by | string   |          | Sort field. Options: name, status, created_at, updated_at.       |
 | order    | string   |          | Sorting order. Options: ASC, DESC.                               |
 | page     | number   |          | Page number for pagination.                                      |
@@ -29,7 +30,7 @@ Retrieve lists.
 ##### Example Request
 
 ```shell
-curl -u "username:password" -X GET 'http://localhost:9000/api/lists?page=1&per_page=100'
+curl -u "api_user:token" -X GET 'http://localhost:9000/api/lists?page=1&per_page=100'
 ```
 
 ##### Example Response
@@ -72,6 +73,28 @@ curl -u "username:password" -X GET 'http://localhost:9000/api/lists?page=1&per_p
 
 ______________________________________________________________________
 
+#### GET /api/public/lists
+
+Retrieve public lists with name and uuid to submit a subscription. This is an unauthenticated call to enable scripting to subscription form.
+
+##### Example Request
+
+```shell
+curl -X GET 'http://localhost:9000/api/public/lists'
+```
+
+##### Example Response
+
+```json
+[
+  {
+    "uuid": "55e243af-80c6-4169-8d7f-bc571e0269e9",
+    "name": "Opt-in list"
+  }
+]
+```
+______________________________________________________________________
+
 #### GET /api/lists/{list_id}
 
 Retrieve a specific list.
@@ -85,7 +108,7 @@ Retrieve a specific list.
 ##### Example Request
 
 ```shell
-curl -u "username:password" -X GET 'http://localhost:9000/api/lists/5'
+curl -u "api_user:token" -X GET 'http://localhost:9000/api/lists/5'
 ```
 
 ##### Example Response
@@ -120,11 +143,12 @@ Create a new list.
 | type  | string    | Yes      | Type of list. Options: private, public. |
 | optin | string    | Yes      | Opt-in type. Options: single, double.   |
 | tags  | string\[\]  |          | Associated tags for a list.             |
+| description | string | No | Description of the new list. |
 
 ##### Example Request
 
 ```shell
-curl -u "username:password" -X POST 'http://localhost:9000/api/lists'
+curl -u "api_user:token" -X POST 'http://localhost:9000/api/lists'
 ```
 
 ##### Example Response
@@ -139,7 +163,8 @@ curl -u "username:password" -X POST 'http://localhost:9000/api/lists'
         "name": "Test list",
         "type": "public",
         "tags": [],
-        "subscriber_count": 0
+        "subscriber_count": 0,
+        "description": "This is a test list"
     }
 }
 null
@@ -160,11 +185,12 @@ Update a list.
 | type    | string    |          | Type of list. Options: private, public. |
 | optin   | string    |          | Opt-in type. Options: single, double.   |
 | tags    | string\[\]  |          | Associated tags for the list.           |
+| description | string |         | Description of the new list.            |
 
 ##### Example Request
 
 ```shell
-curl -u "username:password" -X PUT 'http://localhost:9000/api/lists/5' \
+curl -u "api_user:token" -X PUT 'http://localhost:9000/api/lists/5' \
 --form 'name=modified test list' \
 --form 'type=private'
 ```
@@ -182,7 +208,8 @@ curl -u "username:password" -X PUT 'http://localhost:9000/api/lists/5' \
         "type": "private",
         "optin": "single",
         "tags": [],
-        "subscriber_count": 0
+        "subscriber_count": 0,
+        "description": "This is a test list"
     }
 }
 ```
@@ -202,7 +229,7 @@ Delete a specific subscriber.
 ##### Example Request
 
 ```shell
-curl -u 'username:password' -X DELETE 'http://localhost:9000/api/lists/1'
+curl -u curl -u 'api_username:access_token' -X DELETE 'http://localhost:9000/api/lists/1'
 ```
 
 ##### Example Response
